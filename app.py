@@ -142,12 +142,12 @@ ts = pd.Timestamp(selected_date)
 c1,c2,c3 = st.columns(3)
 
 if ts not in df.index:
-    c1.metric("선택 날짜", selected_date)
+    c1.metric("선택 날짜", str(selected_date))
     c2.metric("실제 종가", "데이터 없음")
     c3.metric("실제 RSI", "데이터 없음")
 else:
     real_close=float(close.loc[ts])
     real_rsi=float(rsi.loc[ts])
-    c1.metric("선택 날짜", selected_date)
+    c1.metric("선택 날짜", str(selected_date))
     c2.metric("실제 종가", f"${real_close:,.2f}")
     c3.metric("실제 RSI", f"{real_rsi:.2f}")
