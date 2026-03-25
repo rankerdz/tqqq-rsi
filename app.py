@@ -70,9 +70,8 @@ def parse_target_rsis(text: str):
 # =========================
 @st.cache_data(ttl=300)
 def get_schedule(start_date, end_date):
-    cal = get_us_market_calendar()
-    schedule = cal.schedule(start_date=start_date, end_date=end_date)
-    return schedule
+    cal = mcal.get_calendar("XNYS")
+    return cal.schedule(start_date=start_date, end_date=end_date).copy()
 
 
 def get_latest_confirmed_session_date(now_ny: datetime):
