@@ -1,4 +1,5 @@
 streamlit
-yfinance
 pandas
 numpy
+yfinance
+pandas_market_calendars
