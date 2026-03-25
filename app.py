@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -24,18 +24,12 @@ KST_TZ = ZoneInfo("Asia/Seoul")
 # =========================
 # 공통 유틸
 # =========================
-def get_now_ny():
+def now_ny():
     return datetime.now(NY_TZ)
 
 
-def get_now_kst():
+def now_kst():
     return datetime.now(KST_TZ)
-
-
-def format_date(d):
-    if d is None or pd.isna(d):
-        return ""
-    return pd.Timestamp(d).strftime("%Y-%m-%d")
 
 
 def safe_float(x):
@@ -45,6 +39,16 @@ def safe_float(x):
         return float(x)
     except Exception:
         return None
+
+
+def fmt_date(x):
+    if x is None or pd.isna(x):
+        return ""
+    return pd.Timestamp(x).strftime("%Y-%m-%d")
+
+
+def parse_tickers(text: str):
+    return [x.strip().upper() for x in text.split(",") if x.strip()]
 
 
 def parse_target_rsis(text: str):
@@ -67,25 +71,16 @@ def parse_target_rsis(text: str):
 # =========================
 @st.cache_data(ttl=300)
 def get_schedule(start_date, end_date):
-    """
-    거래 일정 DataFrame만 캐시
-    calendar 객체 자체는 캐시하지 않음
-    """
     cal = mcal.get_calendar("XNYS")
     schedule = cal.schedule(start_date=start_date, end_date=end_date)
     return schedule.copy()
 
 
-def get_latest_confirmed_session_date(now_ny: datetime):
+def get_latest_confirmed_session_date(current_ny: datetime):
     """
-    미국 본장 종료 기준으로 '확정된 최신 실제 종가 날짜' 반환.
-
-    규칙:
-    - 오늘이 거래일이 아니면: 오늘 이전 마지막 거래일
-    - 오늘이 거래일인데 아직 장 종료 전이면: 전 거래일
-    - 오늘이 거래일이고 장 종료 후면: 오늘
+    미국 정규장 종료 기준으로 최신 '확정된 실제 종가 날짜' 반환
     """
-    today = now_ny.date()
+    today = current_ny.date()
     start = today - timedelta(days=20)
     end = today + timedelta(days=7)
 
@@ -94,29 +89,25 @@ def get_latest_confirmed_session_date(now_ny: datetime):
         return None
 
     session_dates = [idx.date() for idx in schedule.index]
-
     today_schedule = schedule.loc[schedule.index.date == today]
 
-    # 오늘이 휴장/주말이면 이전 거래일
+    # 오늘이 휴장/주말
     if len(today_schedule) == 0:
         past_sessions = [d for d in session_dates if d < today]
         return max(past_sessions) if past_sessions else None
 
     market_close = today_schedule.iloc[0]["market_close"].tz_convert(NY_TZ)
 
-    # 오늘 장이 아직 안 끝났으면 전 거래일
-    if now_ny < market_close:
+    # 오늘 장이 아직 안 끝남
+    if current_ny < market_close:
         past_sessions = [d for d in session_dates if d < today]
         return max(past_sessions) if past_sessions else None
 
-    # 오늘 장 종료 후면 오늘이 최신 실제값
+    # 오늘 장 종료 후
     return today
 
 
 def get_next_session_date(ref_date):
-    """
-    ref_date 다음 미국 거래일 반환
-    """
     if ref_date is None:
         return None
 
@@ -132,7 +123,7 @@ def get_next_session_date(ref_date):
 
 
 # =========================
-# 가격 데이터 로드
+# 데이터 로드
 # =========================
 @st.cache_data(ttl=300)
 def load_price_data(ticker: str, period="10y", interval="1d"):
@@ -150,17 +141,27 @@ def load_price_data(ticker: str, period="10y", interval="1d"):
 
     df = df.copy()
 
-    # yfinance 멀티인덱스 방어
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
     df.index = pd.to_datetime(df.index)
 
-    # 혹시 timezone-aware면 뉴욕 기준으로 맞춘 후 tz 제거
     if getattr(df.index, "tz", None) is not None:
         df.index = df.index.tz_convert(NY_TZ).tz_localize(None)
 
     return df
+
+
+def prepare_daily_df(df: pd.DataFrame):
+    out = df.copy()
+    idx = pd.to_datetime(out.index)
+
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_convert(NY_TZ).tz_localize(None)
+
+    out.index = idx
+    out["_trade_date"] = idx.date
+    return out
 
 
 # =========================
@@ -196,7 +197,6 @@ def add_rsi_wilder(df: pd.DataFrame, period: int = 14):
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
 
-    # 예외 처리
     rsi = rsi.where(~((avg_loss == 0) & (avg_gain > 0)), 100.0)
     rsi = rsi.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
 
@@ -208,16 +208,10 @@ def add_rsi_wilder(df: pd.DataFrame, period: int = 14):
 
 
 # =========================
-# 최신 실제 행 찾기
+# 최신 실제값
 # =========================
-def prepare_daily_df(df: pd.DataFrame):
-    out = df.copy()
-    out["_trade_date"] = pd.to_datetime(out.index).date
-    return out
-
-
-def get_latest_actual_row(df: pd.DataFrame, now_ny: datetime):
-    latest_confirmed_date = get_latest_confirmed_session_date(now_ny)
+def get_latest_actual_row(df: pd.DataFrame, current_ny: datetime):
+    latest_confirmed_date = get_latest_confirmed_session_date(current_ny)
     if latest_confirmed_date is None:
         return None
 
@@ -231,12 +225,25 @@ def get_latest_actual_row(df: pd.DataFrame, now_ny: datetime):
 
 
 # =========================
-# 목표 RSI에 필요한 다음 거래일 종가 역산
+# 특정 날짜 실제값 조회
+# =========================
+def get_row_for_selected_date(df: pd.DataFrame, selected_date: date):
+    if selected_date is None:
+        return None
+
+    daily = prepare_daily_df(df)
+    matched = daily[daily["_trade_date"] == selected_date].copy()
+
+    if matched.empty:
+        return None
+
+    return matched.iloc[-1]
+
+
+# =========================
+# 목표 RSI용 다음 거래일 예상 종가
 # =========================
 def price_for_target_rsi_next_day(latest_close, prev_avg_gain, prev_avg_loss, period, target_rsi):
-    """
-    다음 거래일 종가가 얼마가 되면 target RSI가 되는지 계산
-    """
     latest_close = safe_float(latest_close)
     prev_avg_gain = safe_float(prev_avg_gain)
     prev_avg_loss = safe_float(prev_avg_loss)
@@ -254,10 +261,10 @@ def price_for_target_rsi_next_day(latest_close, prev_avg_gain, prev_avg_loss, pe
 
     target_rs = target_rsi / (100 - target_rsi)
 
-    # 상승 시나리오 (delta >= 0)
+    # 상승 케이스
     delta_up = target_rs * b - a
 
-    # 하락 시나리오 (delta < 0)
+    # 하락 케이스
     delta_down = b - (a / target_rs)
 
     candidates = []
@@ -278,15 +285,14 @@ def price_for_target_rsi_next_day(latest_close, prev_avg_gain, prev_avg_loss, pe
 
     delta = min(candidates, key=lambda x: abs(x))
     predicted_close = latest_close + delta
-
     return predicted_close
 
 
 # =========================
-# 사이드바
+# 화면
 # =========================
 st.title("📈 RSI 기반 예상 종가 앱")
-st.caption("미국 본장 종료 기준으로 최신 실제 종가를 판단하고, 그 다음 거래일의 목표 RSI별 예상 종가를 계산합니다.")
+st.caption("미국 본장 종료 기준으로 최신 실제 종가를 판단하고, 다음 거래일의 목표 RSI별 예상 종가를 계산합니다.")
 
 with st.sidebar:
     st.header("설정")
@@ -295,7 +301,7 @@ with st.sidebar:
         "종목 입력 (쉼표로 구분)",
         value="QQQ, TQQQ, SOXL, NVDA, TSLA"
     )
-    tickers = [x.strip().upper() for x in ticker_text.split(",") if x.strip()]
+    tickers = parse_tickers(ticker_text)
 
     rsi_period = st.number_input(
         "RSI 기간",
@@ -306,7 +312,7 @@ with st.sidebar:
     )
 
     target_rsi_text = st.text_input(
-        "목표 RSI 목록",
+        "목표 RSI 목록 (쉼표로 구분)",
         value="30, 35, 40, 45, 50, 55, 60, 65, 70"
     )
     target_rsis = parse_target_rsis(target_rsi_text)
@@ -320,47 +326,43 @@ with st.sidebar:
     st.markdown("---")
     refresh = st.button("새로고침")
 
-
 if refresh:
     st.cache_data.clear()
-
 
 if not tickers:
     st.warning("종목을 하나 이상 입력해줘.")
     st.stop()
 
 if not target_rsis:
-    st.warning("유효한 목표 RSI를 하나 이상 입력해줘. 예: 30, 40, 50, 60, 70")
+    st.warning("목표 RSI를 하나 이상 입력해줘. 예: 30, 35, 40, 50, 60")
     st.stop()
 
+current_ny = now_ny()
+current_kst = now_kst()
+latest_confirmed_session = get_latest_confirmed_session_date(current_ny)
 
-# =========================
-# 현재 시점 기준
-# =========================
-now_ny = get_now_ny()
-now_kst = get_now_kst()
-latest_confirmed_session = get_latest_confirmed_session_date(now_ny)
-
-col1, col2, col3 = st.columns(3)
-col1.metric("현재 한국시간", now_kst.strftime("%Y-%m-%d %H:%M:%S"))
-col2.metric("현재 뉴욕시간", now_ny.strftime("%Y-%m-%d %H:%M:%S"))
-col3.metric(
+top1, top2, top3 = st.columns(3)
+top1.metric("현재 한국시간", current_kst.strftime("%Y-%m-%d %H:%M:%S"))
+top2.metric("현재 뉴욕시간", current_ny.strftime("%Y-%m-%d %H:%M:%S"))
+top3.metric(
     "최신 실제 확정 거래일",
     latest_confirmed_session.strftime("%Y-%m-%d") if latest_confirmed_session else "-"
 )
 
+st.markdown("---")
 
 # =========================
-# 계산
+# 종목 선택
 # =========================
-prediction_rows = []
-actual_rows = []
+selected_ticker = st.selectbox("실제값 확인용 종목 선택", tickers, index=0)
+
+# 데이터 미리 적재
+data_map = {}
 error_tickers = []
 
 for ticker in tickers:
     try:
         raw = load_price_data(ticker, period=data_period, interval="1d")
-
         if raw.empty or "Close" not in raw.columns:
             error_tickers.append(ticker)
             continue
@@ -368,108 +370,143 @@ for ticker in tickers:
         df = add_rsi_wilder(raw, period=int(rsi_period))
         df = df.dropna(subset=["Close"]).copy()
 
-        latest_row = get_latest_actual_row(df, now_ny)
-        if latest_row is None:
+        if df.empty:
             error_tickers.append(ticker)
             continue
 
-        latest_actual_date = latest_row["_trade_date"]
-        latest_actual_close = safe_float(latest_row["Close"])
-        latest_actual_rsi = safe_float(latest_row["RSI"])
-        latest_avg_gain = safe_float(latest_row["AvgGain"])
-        latest_avg_loss = safe_float(latest_row["AvgLoss"])
-
-        next_session = get_next_session_date(latest_actual_date)
-
-        actual_rows.append({
-            "종목": ticker,
-            "실제 기준일": latest_actual_date,
-            "실제 종가": latest_actual_close,
-            "실제 RSI": latest_actual_rsi,
-        })
-
-        for target_rsi in target_rsis:
-            predicted_close = price_for_target_rsi_next_day(
-                latest_close=latest_actual_close,
-                prev_avg_gain=latest_avg_gain,
-                prev_avg_loss=latest_avg_loss,
-                period=int(rsi_period),
-                target_rsi=target_rsi,
-            )
-
-            diff_pct = None
-            if predicted_close is not None and latest_actual_close not in [None, 0]:
-                diff_pct = ((predicted_close / latest_actual_close) - 1) * 100
-
-            prediction_rows.append({
-                "종목": ticker,
-                "예측 기준일": next_session,
-                "목표 RSI": float(target_rsi),
-                "예상 종가": predicted_close,
-                "현재가 대비(%)": diff_pct,
-            })
-
+        data_map[ticker] = df
     except Exception:
         error_tickers.append(ticker)
 
-
-prediction_df = pd.DataFrame(prediction_rows)
-actual_df = pd.DataFrame(actual_rows)
-
-if actual_df.empty:
+if not data_map:
     st.error("데이터를 불러오지 못했어. 종목 코드를 확인해줘.")
     st.stop()
 
+if selected_ticker not in data_map:
+    st.warning(f"{selected_ticker} 데이터를 불러오지 못했어.")
+    st.stop()
+
+selected_df = data_map[selected_ticker]
+selected_daily = prepare_daily_df(selected_df)
+
+min_date = selected_daily["_trade_date"].min()
+max_date = selected_daily["_trade_date"].max()
 
 # =========================
-# 표시용 포맷
+# 날짜 선택 실제값
 # =========================
-if not prediction_df.empty:
-    prediction_df = prediction_df.sort_values(["종목", "목표 RSI"]).reset_index(drop=True)
-    prediction_df["예측 기준일"] = prediction_df["예측 기준일"].apply(format_date)
-    prediction_df["목표 RSI"] = prediction_df["목표 RSI"].map(lambda x: f"{x:.0f}")
-    prediction_df["예상 종가"] = prediction_df["예상 종가"].map(
-        lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
-    )
-    prediction_df["현재가 대비(%)"] = prediction_df["현재가 대비(%)"].map(
-        lambda x: f"{x:+.2f}%" if pd.notnull(x) else ""
-    )
+st.subheader("선택 날짜 실제 종가 / RSI")
 
-actual_df = actual_df.sort_values(["종목"]).reset_index(drop=True)
-actual_df["실제 기준일"] = actual_df["실제 기준일"].apply(format_date)
-actual_df["실제 종가"] = actual_df["실제 종가"].map(
-    lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
-)
-actual_df["실제 RSI"] = actual_df["실제 RSI"].map(
-    lambda x: f"{x:.2f}" if pd.notnull(x) else ""
+selected_date = st.date_input(
+    "날짜 선택",
+    value=max_date if isinstance(max_date, date) else date.today(),
+    min_value=min_date if isinstance(min_date, date) else None,
+    max_value=max_date if isinstance(max_date, date) else None,
 )
 
+selected_row = get_row_for_selected_date(selected_df, selected_date)
 
-# =========================
-# 출력
-# =========================
+if selected_row is None:
+    actual_selected_df = pd.DataFrame([{
+        "종목": selected_ticker,
+        "선택 날짜": selected_date,
+        "실제 종가": "",
+        "실제 RSI": "",
+        "비고": "해당 날짜는 거래일 데이터가 없음"
+    }])
+else:
+    actual_selected_df = pd.DataFrame([{
+        "종목": selected_ticker,
+        "선택 날짜": selected_row["_trade_date"],
+        "실제 종가": round(float(selected_row["Close"]), 2),
+        "실제 RSI": round(float(selected_row["RSI"]), 2) if pd.notnull(selected_row["RSI"]) else "",
+        "비고": ""
+    }])
+
+display_actual_selected_df = actual_selected_df.copy()
+display_actual_selected_df["선택 날짜"] = display_actual_selected_df["선택 날짜"].apply(fmt_date)
+display_actual_selected_df["실제 종가"] = display_actual_selected_df["실제 종가"].apply(
+    lambda x: f"{x:,.2f}" if isinstance(x, (int, float)) else x
+)
+display_actual_selected_df["실제 RSI"] = display_actual_selected_df["실제 RSI"].apply(
+    lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else x
+)
+
+st.dataframe(display_actual_selected_df, use_container_width=True, hide_index=True)
+
 st.markdown("---")
+
+# =========================
+# 예측표
+# =========================
 st.subheader("목표 RSI별 예상 종가")
 st.caption("예측 기준일은 미국 본장 종료 기준 최신 실제 종가의 다음 거래일입니다.")
+
+prediction_rows = []
+
+for ticker in tickers:
+    if ticker not in data_map:
+        continue
+
+    df = data_map[ticker]
+    latest_row = get_latest_actual_row(df, current_ny)
+
+    if latest_row is None:
+        continue
+
+    latest_date = latest_row["_trade_date"]
+    latest_close = safe_float(latest_row["Close"])
+    latest_rsi = safe_float(latest_row["RSI"])
+    latest_avg_gain = safe_float(latest_row["AvgGain"])
+    latest_avg_loss = safe_float(latest_row["AvgLoss"])
+
+    prediction_date = get_next_session_date(latest_date)
+    if prediction_date is None:
+        prediction_date = latest_date + timedelta(days=1)
+
+    for target_rsi in target_rsis:
+        predicted_close = price_for_target_rsi_next_day(
+            latest_close=latest_close,
+            prev_avg_gain=latest_avg_gain,
+            prev_avg_loss=latest_avg_loss,
+            period=int(rsi_period),
+            target_rsi=target_rsi,
+        )
+
+        prediction_rows.append({
+            "종목": ticker,
+            "예측 기준일": prediction_date,
+            "최신 실제 종가일": latest_date,
+            "최신 실제 종가": latest_close,
+            "최신 실제 RSI": latest_rsi,
+            "목표 RSI": target_rsi,
+            "예상 종가": predicted_close,
+        })
+
+prediction_df = pd.DataFrame(prediction_rows)
 
 if prediction_df.empty:
     st.info("예상 종가 결과가 없습니다.")
 else:
-    st.dataframe(
-        prediction_df,
-        use_container_width=True,
-        hide_index=True,
+    prediction_df = prediction_df.sort_values(["종목", "목표 RSI"]).reset_index(drop=True)
+
+    display_prediction_df = prediction_df.copy()
+    display_prediction_df["예측 기준일"] = display_prediction_df["예측 기준일"].apply(fmt_date)
+    display_prediction_df["최신 실제 종가일"] = display_prediction_df["최신 실제 종가일"].apply(fmt_date)
+    display_prediction_df["최신 실제 종가"] = display_prediction_df["최신 실제 종가"].apply(
+        lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
+    )
+    display_prediction_df["최신 실제 RSI"] = display_prediction_df["최신 실제 RSI"].apply(
+        lambda x: f"{x:.2f}" if pd.notnull(x) else ""
+    )
+    display_prediction_df["목표 RSI"] = display_prediction_df["목표 RSI"].apply(
+        lambda x: f"{x:.0f}" if pd.notnull(x) else ""
+    )
+    display_prediction_df["예상 종가"] = display_prediction_df["예상 종가"].apply(
+        lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
     )
 
-st.markdown("---")
-st.subheader("최신 실제 종가 / RSI")
-st.caption("실제 기준일은 미국 정규장 종료 기준으로 확정된 최신 거래일입니다.")
-
-st.dataframe(
-    actual_df,
-    use_container_width=True,
-    hide_index=True,
-)
+    st.dataframe(display_prediction_df, use_container_width=True, hide_index=True)
 
 if error_tickers:
     st.markdown("---")
