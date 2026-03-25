@@ -136,7 +136,14 @@ st.divider()
 
 st.subheader("실제 데이터 조회")
 
-selected_date = st.date_input("날짜 선택", value=latest_date)
+inception_date = df.index[0].date()
+
+selected_date = st.date_input(
+    "날짜 선택",
+    value=latest_date,
+    min_value=inception_date,
+    max_value=latest_date,
+)
 ts = pd.Timestamp(selected_date)
 
 c1,c2,c3 = st.columns(3)
